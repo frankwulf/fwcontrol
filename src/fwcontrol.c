@@ -1,10 +1,10 @@
 // Author:  Frank Wulf
-// Version: 2.0 (2018-08-18)
+// Version: 2.0 (2018-08-24)
 //
 // This program monitors temperatures of both system and hard drives and
 // changes fan speeds accordingly.
 //
-// Copyright (C) 2018 Frank Wulf
+// Copyright (C) 2017 Frank Wulf
 //
 // This program is free software: you can redistribute it and/or modify it
 // under the terms of the GNU General Public License as published by the Free
@@ -95,8 +95,7 @@ struct s_temp {
 char ***scan_hdd, ***scan_sys;
 char first_check = 1;
 
-int max_fans, max_total[2], max_per_fan[2];
-short count_fans = 0;
+short count_fans, count_total[2], max_per_fan[2];
 time_t now, next_check;
 
 typedef void (*sighandler_t)(int);
@@ -161,7 +160,7 @@ int read_mem_conf(void) {
 
     while (fgets(buf, BUFSIZE, fp) != NULL) {
         if (buf[0] == '[') {
-            ++max_fans;
+            ++count_fans;
             per_fan[SYS] = 0;
             per_fan[HDD] = 0;
         } else {
@@ -176,15 +175,15 @@ int read_mem_conf(void) {
                     value_w_comma = malloc(strlen(value) + 2);
                     strcpy(value_w_comma, value);
                     strcat(value_w_comma, ",");
-                    if (max_total[t] == 0) {
+                    if (count_total[t] == 0) {
                         total[t] = calloc(1, strlen(value_w_comma) + 1);
                         strcat(total[t], value_w_comma);
-                        ++max_total[t];
+                        ++count_total[t];
                     } else if (strstr(total[t], value_w_comma) == NULL) {
                         len = strlen(total[t]) + strlen(value_w_comma) + 1;
                         total[t] = realloc(total[t], len);
                         strcat(total[t], value_w_comma);
-                        ++max_total[t];
+                        ++count_total[t];
                     }
                     free(value_w_comma);
                     if (++per_fan[t] > max_per_fan[t])
@@ -197,8 +196,10 @@ int read_mem_conf(void) {
     fclose(fp);
 
     syslog(LOG_NOTICE,
-      "Controlling %d fan(s) by monitoring %d SYS sensor(s) and %d HDD(s)",
-      max_fans, max_total[SYS], max_total[HDD]);
+      "Controlling %d %s by monitoring %d system %s and %d %s",
+      count_fans, (count_fans == 1) ? "fan" : "fans", count_total[SYS],
+      (count_total[SYS] == 1) ? "sensor" : "sensors", count_total[HDD],
+      (count_total[HDD] == 1) ? "hard drive" : "hard drives");
     free(total[SYS]);
     free(total[HDD]);
 
@@ -208,7 +209,7 @@ int read_mem_conf(void) {
 int read_fan_conf(void) {
     FILE *fp;
     char *name, *value, buf[BUFSIZE];
-    int i = -1, j, k, l, t;
+    short i = -1, j, k[2], t;
 
     now = time(NULL);
     if ((fp = fopen("/etc/fwcontrol.conf", "r")) == NULL) {
@@ -218,12 +219,9 @@ int read_fan_conf(void) {
 
     while (fgets(buf, BUFSIZE, fp) != NULL) {
         if (buf[0] == '[') {
-            if (++i >= max_fans)
-                break;
-            count_fans = i + 1;
-            strcpy(fan[i].name, strtok(buf, "[]\n"));
-            k = 0;
-            l = 0;
+            strcpy(fan[++i].name, strtok(buf, "[]\n"));
+            k[SYS] = 0;
+            k[HDD] = 0;
         } else if (i >= 0) {
             name = strtok(buf, "=");
             value = strtok(NULL, "=");
@@ -254,20 +252,17 @@ int read_fan_conf(void) {
                 fan[i].idle_pwm = atoi(value);
             } else if (strncmp(name, "error_pwm_", 10) == 0) {
                 fan[i].error_pwm[t] = atoi(value);
-            } else if (strcmp(name, "sys_input") == 0) {
+            } else if (strcmp(name, "sys_input") == 0 ||
+                       strcmp(name, "scan_hdd") == 0 ) {
                 value = strtok(value, ",");
-                while (value != NULL && ++l <= max_per_fan[SYS]) {
-                    strcpy(scan_sys[i][l-1], value);
+                while (value != NULL) {
+                    if (t == SYS)
+                        strcpy(scan_sys[i][k[t]++], value);
+                    else
+                        strcpy(scan_hdd[i][k[t]++], value);
                     value = strtok(NULL, ",");
                 }
-                fan[i].count_scan[SYS] = l;
-            } else if (strcmp(name, "scan_hdd") == 0) {
-                value = strtok(value, ",");
-                while (value != NULL && ++k <= max_per_fan[HDD]) {
-                    strcpy(scan_hdd[i][k-1], value);
-                    value = strtok(NULL, ",");
-                }
-                fan[i].count_scan[HDD] = k;
+                fan[i].count_scan[t] = k[t];
             } else if (strncmp(name, "temp_pwm_", 9) == 0) {
                 j = 0;
                 value = strtok(value, ",");
@@ -450,9 +445,9 @@ static inline int control_fan_speed(void) {
                     // Check if temperature is in buffer
                     sw_buffered = 0;
                     for (int k = 0; k < count_buffer; k++)
-                        if ((type == HDD && strcmp(temp_buf[k].name,
-                           scan_hdd[i][j]) == 0) || (type == SYS &&
-                           strcmp(temp_buf[k].name, scan_sys[i][j]) == 0)) {
+                        if ((type == SYS && strcmp(temp_buf[k].name,
+                           scan_sys[i][j]) == 0) || (type == HDD &&
+                           strcmp(temp_buf[k].name, scan_hdd[i][j]) == 0)) {
                             dev_temp = temp_buf[k].temp;
                             sw_buffered = 1;
                             break;
@@ -472,10 +467,10 @@ static inline int control_fan_speed(void) {
                             sw_error = 1;
 
                         // Write temperature to buffer
-                        if (type == HDD)
-                            strcpy(temp_buf[count_buffer].name, scan_hdd[i][j]);
-                        else
+                        if (type == SYS)
                             strcpy(temp_buf[count_buffer].name, scan_sys[i][j]);
+                        else
+                            strcpy(temp_buf[count_buffer].name, scan_hdd[i][j]);
 
                         temp_buf[count_buffer++].temp = dev_temp;
                     }
@@ -487,11 +482,10 @@ static inline int control_fan_speed(void) {
                 if (sw_error == 1 && calc_pwm(type, i, temp) <
                    fan[i].error_pwm[type])
                     fan[i].pwm[type] = fan[i].error_pwm[type];
-                else if ((((fan[i].temp[type] - temp >= fan[i].hyst[type]) &&
-                   now >= fan[i].min_decr_time) || temp > fan[i].temp[type]) &&
-                   ((new_pwm = calc_pwm(type, i, temp)) != fan[i].pwm[type] ||
-                   new_pwm == 0 || first_check == 1)) {
-                    fan[i].pwm[type] = new_pwm;
+                else if (!(temp < fan[i].temp[type] && (fan[i].hyst[type] >
+                   fan[i].temp[type] - temp || now < fan[i].min_decr_time)) &&
+                   (fan[i].temp[type] != temp || first_check == 1)) {
+                    fan[i].pwm[type] = calc_pwm(type, i, temp);
                     fan[i].temp[type] = temp;
                 }
 
@@ -534,13 +528,16 @@ static inline int control_fan_speed(void) {
         if (fan[i].loglevel >= 1)
             if (first_check == 1)
                 syslog(LOG_NOTICE,
-                  "%s: PWM set to %d (SYS: %d°C, HDD: %d°C)\n",
-                  fan[i].name, new_pwm, fan[i].temp[SYS], fan[i].temp[HDD]);
+                  "%s: PWM set to %d (SYS: %d°%s, HDD: %d°%s)\n",
+                  fan[i].name, new_pwm, fan[i].temp[SYS],
+                  (fan[i].pwm[SYS] < new_pwm) ? "C" : "C*", fan[i].temp[HDD],
+                  (fan[i].pwm[HDD] < new_pwm) ? "C" : "C*");
             else
                 syslog(LOG_NOTICE,
-                  "%s: PWM changed from %d to %d (SYS: %d°C, HDD: %d°C)\n",
+                  "%s: PWM changed from %d to %d (SYS: %d°%s, HDD: %d°%s)\n",
                   fan[i].name, fan[i].actual_pwm, new_pwm, fan[i].temp[SYS],
-                  fan[i].temp[HDD]);
+                  (fan[i].pwm[SYS] < new_pwm) ? "C" : "C*", fan[i].temp[HDD],
+                  (fan[i].pwm[HDD] < new_pwm) ? "C" : "C*");
         if (fan[i].actual_pwm < new_pwm)
             fan[i].min_decr_time = now + fan[i].decr_delay;
         if (fan[i].actual_pwm == 0 && new_pwm != 0)
@@ -562,23 +559,23 @@ int main (int argc, char **argv) {
     // allocate memory accordingly
     read_mem_conf();
 
-    fan = calloc(max_fans, sizeof(struct s_fan));
-    temp_buf = calloc(max_total[SYS] + max_total[HDD], sizeof(struct s_temp));
+    fan = calloc(count_fans, sizeof(struct s_fan));
+    temp_buf = calloc(count_total[SYS]+count_total[HDD], sizeof(struct s_temp));
     data_pwm = calloc(2, sizeof(struct s_temp_pwm));
     for (h = 0; h < 2; h++) {
-        data_pwm[h] =  calloc(max_fans, sizeof(data_pwm[0]));
-        for (r = 0; r < max_fans; r++)
+        data_pwm[h] =  calloc(count_fans, sizeof(data_pwm[0]));
+        for (r = 0; r < count_fans; r++)
             data_pwm[h][r] = calloc(MAX_STEP, sizeof(data_pwm[0][0]));
     }
-    scan_hdd = calloc(max_fans, sizeof(char**));
-    scan_sys = calloc(max_fans, sizeof(char**));
-    for (h = 0; h < max_fans; h++) {
-        scan_hdd[h] = calloc(max_per_fan[HDD], sizeof(char*));
+    scan_sys = calloc(count_fans, sizeof(char**));
+    scan_hdd = calloc(count_fans, sizeof(char**));
+    for (h = 0; h < count_fans; h++) {
         scan_sys[h] = calloc(max_per_fan[SYS], sizeof(char*));
-        for (r = 0; r < max_per_fan[HDD]; r++)
-            scan_hdd[h][r] = calloc(10, sizeof(char));
+        scan_hdd[h] = calloc(max_per_fan[HDD], sizeof(char*));
         for (r = 0; r < max_per_fan[SYS]; r++)
             scan_sys[h][r] = calloc(50, sizeof(char));
+        for (r = 0; r < max_per_fan[HDD]; r++)
+            scan_hdd[h][r] = calloc(10, sizeof(char));
     }
 
     // Read fan configuration
