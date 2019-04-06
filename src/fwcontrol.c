@@ -1,5 +1,5 @@
 // Author:  Frank Wulf
-// Version: 2.0 (2018-08-24)
+// Version: 2.0 (2018-09-07)
 //
 // This program monitors temperatures of both system and hard drives and
 // changes fan speeds accordingly.
@@ -33,13 +33,15 @@
 #include <errno.h>
 #include <scsi/sg.h>
 
-#define BUFSIZE 256
-#define FAN_MODE 1
-#define MAX_STEP 10
+enum {BUFSIZE = 256};
+enum {FAN_MODE = 1};
+enum {MAX_STEP = 10};
 
-#define SMART_BUFFER_SIZE 512
-#define SMART_SENSE_BUFFER_SIZE 32
-#define SMART_CMD_LENGTH 12
+enum {
+    SMART_BUFFER_SIZE = 512,
+    SMART_SENSE_BUFFER_SIZE = 32,
+    SMART_CMD_LENGTH = 12
+};
 
 enum {
     ATA_OP_CHECKPOWERMODE1 = 0xe5,
@@ -52,10 +54,9 @@ enum {
 enum {
     SG_ATA_16 = 0x85,
     SG_ATA_16_LEN = 16,
-    SG_ATA_PROTO_NON_DATA = (3 << 1)
+    SG_ATA_PROTO_NON_DATA = (3 << 1),
+    SG_CDB2_CHECK_COND = (1 << 5)
 };
-
-enum {SG_CDB2_CHECK_COND = (1 << 5)};
 
 enum {SYS, HDD};
 
@@ -64,13 +65,13 @@ struct s_fan {
     char control[2];
     char pwm_enable[50];
     char pwm_write[50];
-    short stop_delay;
-    short decr_delay;
-    short interval[2];
+    unsigned short stop_delay;
+    unsigned short decr_delay;
+    unsigned short interval[2];
     char interpolate[2];
     short hyst[2];
-    short count_scan[2];
-    short count_step[2];
+    unsigned short count_scan[2];
+    unsigned short count_step[2];
     time_t next_check[2];
     char loglevel;
     short temp[2];
@@ -95,44 +96,8 @@ struct s_temp {
 char ***scan_hdd, ***scan_sys;
 char first_check = 1;
 
-short count_fans, count_total[2], max_per_fan[2];
+unsigned short count_fans, count_total[2], max_per_fan[2];
 time_t now, next_check;
-
-typedef void (*sighandler_t)(int);
-
-static sighandler_t handle_signal(int sig_nr, sighandler_t signalhandler) {
-    struct sigaction new_sig, old_sig;
-    new_sig.sa_handler = signalhandler;
-    sigemptyset(&new_sig.sa_mask);
-    new_sig.sa_flags = SA_RESTART;
-    if (sigaction(sig_nr, &new_sig, &old_sig) < 0)
-        return SIG_ERR;
-    return old_sig.sa_handler;
-}
-
-static void start_daemon(const char *log_name, int facility) {
-    int i;
-    pid_t pid;
-    // Fork off parent process
-    if ((pid = fork()) != 0)
-        exit(EXIT_FAILURE);
-    // Create new SID for child process
-    if (setsid() < 0)
-        exit(EXIT_FAILURE);
-    // Ignore signal SIGHUP
-    handle_signal(SIGHUP, SIG_IGN);
-    // Fork off child process
-    if ((pid = fork()) != 0)
-        exit(EXIT_FAILURE);
-    // Change working directory
-    chdir("/");
-    // Change file mode mask
-    umask(0);
-    // Close all file descriptors
-    for (i = sysconf(_SC_OPEN_MAX); i > 0; i--)
-        close(i);
-    openlog(log_name, LOG_PID | LOG_CONS | LOG_NDELAY, facility);
-}
 
 static inline int write_fan(char *name, unsigned char value) {
     FILE *fp;
@@ -194,14 +159,14 @@ int read_mem_conf(void) {
         }
     }
     fclose(fp);
+    free(total[SYS]);
+    free(total[HDD]);
 
     syslog(LOG_NOTICE,
       "Controlling %d %s by monitoring %d system %s and %d %s",
       count_fans, (count_fans == 1) ? "fan" : "fans", count_total[SYS],
       (count_total[SYS] == 1) ? "sensor" : "sensors", count_total[HDD],
       (count_total[HDD] == 1) ? "hard drive" : "hard drives");
-    free(total[SYS]);
-    free(total[HDD]);
 
     return 0;
 }
@@ -551,8 +516,7 @@ static inline int control_fan_speed(void) {
 }
 
 int main (int argc, char **argv) {
-    int h, r;
-    start_daemon ("fwcontrol", LOG_LOCAL0);
+    openlog("fwcontrol", LOG_PID | LOG_CONS | LOG_NDELAY, LOG_LOCAL0);
     syslog(LOG_NOTICE, "fwcontrol started ...\n");
 
     // Determine number of configured fans, system sensors and hard drives and
@@ -562,19 +526,19 @@ int main (int argc, char **argv) {
     fan = calloc(count_fans, sizeof(struct s_fan));
     temp_buf = calloc(count_total[SYS]+count_total[HDD], sizeof(struct s_temp));
     data_pwm = calloc(2, sizeof(struct s_temp_pwm));
-    for (h = 0; h < 2; h++) {
+    for (int h = 0; h < 2; h++) {
         data_pwm[h] =  calloc(count_fans, sizeof(data_pwm[0]));
-        for (r = 0; r < count_fans; r++)
+        for (int r = 0; r < count_fans; r++)
             data_pwm[h][r] = calloc(MAX_STEP, sizeof(data_pwm[0][0]));
     }
     scan_sys = calloc(count_fans, sizeof(char**));
     scan_hdd = calloc(count_fans, sizeof(char**));
-    for (h = 0; h < count_fans; h++) {
+    for (int h = 0; h < count_fans; h++) {
         scan_sys[h] = calloc(max_per_fan[SYS], sizeof(char*));
         scan_hdd[h] = calloc(max_per_fan[HDD], sizeof(char*));
-        for (r = 0; r < max_per_fan[SYS]; r++)
+        for (int r = 0; r < max_per_fan[SYS]; r++)
             scan_sys[h][r] = calloc(50, sizeof(char));
-        for (r = 0; r < max_per_fan[HDD]; r++)
+        for (int r = 0; r < max_per_fan[HDD]; r++)
             scan_hdd[h][r] = calloc(10, sizeof(char));
     }
 
